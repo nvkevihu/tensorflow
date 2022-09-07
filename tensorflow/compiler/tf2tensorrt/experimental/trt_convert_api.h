@@ -94,9 +94,11 @@ class TrtGraphConverter {
  public:
   static StatusOr<std::unique_ptr<TrtGraphConverter>> Create(
       const GraphDef& frozen_graph_def,
+      const std::vector<std::string>& input_names,
+      const std::vector<std::string>& output_names,
       const TrtConversionParams& conversion_params = TrtConversionParams());
 
-  Status Convert(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
+  StatusOr<GraphDef> Convert(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
 
   StatusOr<GraphDef> Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
 
@@ -105,15 +107,23 @@ class TrtGraphConverter {
  private:
   TrtGraphConverter(
       const GraphDef& frozen_graph_def,
+      const std::vector<std::string>& input_names,
+      const std::vector<std::string>& output_names,
       const TrtConversionParams& conversion_params);
 
   Status Validate();
 
   // The frozen GraphDef to convert.
-  const GraphDef& frozen_graph_def_;
+  GraphDef frozen_graph_def_;
+
+  // Names of input tensors for the graph.
+  const std::vector<std::string> input_names_;
+
+  // Names of output tensors for the graph.
+  const std::vector<std::string> output_names_;
 
   // A TrtConversionParams instance.
-  const TrtConversionParams& conversion_params_;
+  const TrtConversionParams conversion_params_;
 };
 
 }  // namespace tensorrt

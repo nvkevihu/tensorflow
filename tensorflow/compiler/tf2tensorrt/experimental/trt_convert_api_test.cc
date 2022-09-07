@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2tensorrt/experimental/trt_convert_api.h"
 
+#include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/core/framework/function_testlib.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -35,9 +36,25 @@ class TrtGraphConverterTest
   }
 
   void Reset() {
-    GraphDef graph;
+    PartialTensorShape shape({-1, 2});
+    GraphDef graph = GetGraphDef(shape);
     converter_ = std::move(TrtGraphConverter::Create(
-        graph, params_).ValueOrDie());
+        graph, {"input"}, {"output"}, params_).ValueOrDie());
+  }
+
+  // Returns the following graph: output = input * [42, 137] + input
+  GraphDef GetGraphDef(PartialTensorShape input_shape) {
+    Scope root = Scope::NewRootScope();
+    Output c = ops::Const(root.WithOpName("my_const"), {{42.0f, 137.0f}});
+    const auto attrs = ops::Placeholder::Shape(input_shape);
+    auto x = ops::Placeholder(root.WithOpName("input"), DT_FLOAT, attrs);
+    auto y = ops::Mul(root.WithOpName("my_mul"), x, c);
+    auto z = ops::Add(root.WithOpName("my_add"), x, y);
+    auto q = ops::Identity(root.WithOpName("output"), z);
+
+    GraphDef out;
+    TF_CHECK_OK(root.ToGraphDef(&out));
+    return out;
   }
 
   TrtConversionParams params_;
@@ -49,7 +66,7 @@ INSTANTIATE_TEST_CASE_P(
     ::testing::Values(TrtConversionParams()));
 
 TEST_P(TrtGraphConverterTest, Basic) {
-  TF_ASSERT_OK(converter_->Convert({}));
+  TF_ASSERT_OK(converter_->Convert({}).status());
 }
 
 }  // namespace tensorrt

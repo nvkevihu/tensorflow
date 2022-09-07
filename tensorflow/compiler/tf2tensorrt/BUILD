@@ -123,6 +123,71 @@ tf_cuda_cc_test(
 )
 
 cc_library(
+    name = "experimental_trt_convert_api",
+    srcs = ["experimental/trt_convert_api.cc"],
+    hdrs = [
+        "experimental/trt_convert_api.h",
+    ],
+    copts = tf_copts(),
+    deps = [
+        ":trt_parameters",
+        ":trt_resources",
+        "//tensorflow/cc/tools:freeze_saved_model",
+        "//tensorflow/core:direct_session",
+        "//tensorflow/core:framework",
+        "//tensorflow/core/grappler:grappler_item_builder",
+        "//tensorflow/core/grappler/clusters:single_machine",
+        "//tensorflow/core/platform:logging",
+        "@com_google_absl//absl/strings",
+    ] + if_tensorrt([":tensorrt_lib"]),
+)
+
+tf_cuda_cc_test(
+    name = "experimental_trt_convert_api_test",
+    size = "small",
+    srcs = ["experimental/trt_convert_api_test.cc"],
+    tags = [
+        "no_cuda_on_cpu_tap",
+        "no_windows",
+        "nomac",
+    ],
+    deps = [
+        ":common_utils",
+        ":testutils",
+        ":trt_conversion",
+        ":experimental_trt_convert_api",
+        ":trt_logging",
+        ":trt_op_kernels",
+        ":trt_resources",
+        ":utils",
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:resource_variable_ops",
+        "//tensorflow/cc:scope",
+        "//tensorflow/core:array_ops_op_lib",
+        "//tensorflow/core:core_cpu",
+        "//tensorflow/core:core_cpu_internal",
+        "//tensorflow/core:direct_session",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:function_ops_op_lib",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_internal",
+        "//tensorflow/core:math_ops_op_lib",
+        "//tensorflow/core:no_op_op_lib",
+        "//tensorflow/core:ops",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:state_ops_op_lib",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:assign_op",
+        "//tensorflow/core/kernels:ops_testutil",
+        "//tensorflow/core/kernels:partitioned_function_ops",
+        "//tensorflow/core/kernels:resource_variable_ops",
+    ],
+)
+
+cc_library(
     name = "trt_convert_api",
     srcs = ["trt_convert_api.cc"],
     hdrs = [
