@@ -37,6 +37,7 @@ class TrtGraphConverterTest
 
   void Reset() {
     PartialTensorShape shape({-1, 2});
+    input_tensors_ = GetInputTensors({{1, 2}, {4, 2}});
     GraphDef graph = GetGraphDef(shape);
     converter_ = std::move(TrtGraphConverter::Create(
         graph, {"input"}, {"output"}, params_).ValueOrDie());
@@ -57,8 +58,21 @@ class TrtGraphConverterTest
     return out;
   }
 
+  // Creates a list of input tensors, they will be used to build the engines.
+  std::vector<std::vector<Tensor>> GetInputTensors(
+      const std::vector<std::vector<int64>>& input_shapes) {
+    std::vector<std::vector<Tensor>> input_tensors;
+    for (const auto& shape : input_shapes) {
+      Tensor tensor(DT_FLOAT, TensorShape(shape));
+      test::FillIota(&tensor, 1.0f);
+      input_tensors.push_back({tensor});
+    }
+    return input_tensors;
+  }
+
   TrtConversionParams params_;
   std::unique_ptr<TrtGraphConverter> converter_;
+  std::vector<std::vector<Tensor>> input_tensors_;
 };
 
 INSTANTIATE_TEST_CASE_P(
@@ -66,7 +80,8 @@ INSTANTIATE_TEST_CASE_P(
     ::testing::Values(TrtConversionParams()));
 
 TEST_P(TrtGraphConverterTest, Basic) {
-  TF_ASSERT_OK(converter_->Convert({}).status());
+  TF_EXPECT_OK(converter_->Convert().status());
+  TF_EXPECT_OK(converter_->Build(input_tensors_));
 }
 
 }  // namespace tensorrt

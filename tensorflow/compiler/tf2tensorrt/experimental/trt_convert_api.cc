@@ -45,6 +45,8 @@ limitations under the License.
 namespace tensorflow {
 namespace tensorrt {
 
+namespace {
+
 // Creates and provisions a new cluster. The caller must call Shutdown before
 // the cluster is destroyed.
 Status NewCluster(grappler::Cluster** cluster) {
@@ -166,6 +168,79 @@ Status RunTfTrt(const MetaGraphDef& meta_graph_def,
   return Status::OK();
 }
 
+// Sets the _profile_generation mode attribute of all TRTEngineOp nodes in the
+// graph to mode.
+Status SetProfileGenerationMode(GraphDef* graph_def, bool mode) {
+  VLOG(3) << "Setting _profile_generation_mode=" << mode;
+  std::string op{"TRTEngineOp"};
+  for (auto& node : *(graph_def->mutable_node())) {
+    if (!op.compare(node.op())) {
+      auto* attr = node.mutable_attr();
+      AttrValue profile_generation_mode;
+      profile_generation_mode.set_b(mode);
+      (*attr)["_profile_generation_mode"] = profile_generation_mode;
+    }
+  }
+  return Status::OK();
+}
+
+Status ImportGraphDefToSession(Session* session, const GraphDef& graph_def,
+                               const string& prefix) {
+  ImportGraphDefOptions opts;
+  opts.prefix = prefix;
+  Graph graph(OpRegistry::Global());
+  TF_RETURN_IF_ERROR(ImportGraphDef(opts, graph_def, &graph, nullptr));
+  GraphDef new_graph_def;
+  graph.ToGraphDef(&new_graph_def);
+  TF_RETURN_IF_ERROR(session->Extend(new_graph_def));
+  return Status::OK();
+}
+
+// Returns configuration used during the build step session run.
+tensorflow::SessionOptions GetSessionConfg() {
+  // We also need to disable constant folding because we already ran constant
+  // folding and may have prevented quantization operation folding on purpose.
+  tensorflow::SessionOptions opts;
+  auto* rewriter_opts =
+      opts.config.mutable_graph_options()->mutable_rewrite_options();
+  rewriter_opts->set_experimental_disable_folding_quantization_emulation(true);
+
+  // It seems  that we need to disable the optimizer entirely to prevent the
+  // folding.
+  rewriter_opts->set_disable_meta_optimizer(true);
+  return opts;
+}
+
+Status RunSession(Session* session, const std::vector<std::string>& input_names,
+                  const std::vector<std::string>& output_names,
+                  const std::vector<Tensor>& input_tensors,
+                  std::string prefix = "") {
+  TRT_ENSURE(!input_names.empty());
+  TRT_ENSURE(!output_names.empty());
+  TRT_ENSURE(!input_tensors.empty());
+
+  std::vector<std::pair<std::string, tensorflow::Tensor>> input_pairs;
+  std::vector<std::string> prefixed_output_names;
+  auto prefixed_name = [](std::string prefix, std::string name) {
+    return prefix.size() > 0 ? absl::StrJoin({prefix, name}, "/") : name;
+  };
+  for (int i = 0; i < input_names.size(); i++) {
+    input_pairs.push_back(
+        {prefixed_name(prefix, input_names.at(i)), input_tensors.at(i)});
+  }
+  for (int i = 0; i < output_names.size(); i++) {
+    prefixed_output_names.push_back(prefixed_name(prefix, output_names.at(i)));
+  }
+  std::vector<tensorflow::Tensor> output_tensors;
+  for (int i = 0; i < output_names.size(); i++) {
+    output_tensors.push_back({});
+  }
+  VLOG(3) << "TF-TRT Build mode: running inference\n";
+  TF_RETURN_IF_ERROR(
+      session->Run(input_pairs, prefixed_output_names, {}, &output_tensors));
+  return Status::OK();
+}
+
 // TODO
 Status IsFrozenGraph(const GraphDef& graph) {
   return Status::OK();
@@ -175,6 +250,8 @@ Status IsFrozenGraph(const GraphDef& graph) {
 Status CheckConversionParams(const TrtConversionParams& conversion_params) {
   return Status::OK();
 }
+
+}  // namespace
 
 // static
 StatusOr<std::unique_ptr<TrtGraphConverter>> TrtGraphConverter::Create(
@@ -212,18 +289,45 @@ StatusOr<GraphDef> TrtGraphConverter::Convert(const std::vector<std::vector<tens
   TF_RETURN_IF_ERROR(
       GetTrtRewriterConfig(conversion_params_, &rewriter_config));
 
-  GraphDef segmented_graph_def;
   TF_RETURN_IF_ERROR(RunTfTrt(meta_graph, input_names_, output_names_,
-                              rewriter_config, &segmented_graph_def));
+                              rewriter_config, &segmented_graph_def_));
 
   VLOG(1) << "TF-TRT conversion finished";
   // TODO: Calibration
 
-  return segmented_graph_def;
+  return segmented_graph_def_;
 }
 
-// TODO
-StatusOr<GraphDef> TrtGraphConverter::Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs) {
+Status TrtGraphConverter::Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs) {
+  // The TRTOptimization pass has inserted placeholder TRTEngineOps. Here we
+  // trigger conversion by inferring the graph.
+  std::unique_ptr<tensorflow::Session> session(
+      tensorflow::NewSession(GetSessionConfg()));
+  if (!session.get()) {
+    return errors::Internal("Failed to create build session");
+  }
+
+  VLOG(2) << "Building the model";
+  bool need_collect_profiles = conversion_params_.use_dynamic_shape && inputs.size() > 1;
+  if (need_collect_profiles) {
+    TF_RETURN_IF_ERROR(SetProfileGenerationMode(&segmented_graph_def_, true));
+  }
+  TF_RETURN_IF_ERROR(session->Create(segmented_graph_def_));
+  std::string prefix = "";
+  if (need_collect_profiles) {
+    for (auto const& input : inputs) {
+      TF_RETURN_IF_ERROR(RunSession(session.get(), input_names_, output_names_, input));
+    }
+    prefix = "TrtBuildStep";
+    TF_RETURN_IF_ERROR(SetProfileGenerationMode(&segmented_graph_def_, false));
+    VLOG(3) << "Importing graph with _profile_generation_mode disabled";
+    TF_RETURN_IF_ERROR(
+        ImportGraphDefToSession(session.get(), segmented_graph_def_, prefix));
+  }
+  TF_RETURN_IF_ERROR(
+      RunSession(session.get(), input_names_, output_names_, *inputs.begin(), prefix));
+  // TODO: Calibration
+
   return Status::OK();
 }
 

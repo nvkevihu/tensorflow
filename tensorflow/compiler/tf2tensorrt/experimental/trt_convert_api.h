@@ -98,9 +98,9 @@ class TrtGraphConverter {
       const std::vector<std::string>& output_names,
       const TrtConversionParams& conversion_params = TrtConversionParams());
 
-  StatusOr<GraphDef> Convert(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
+  StatusOr<GraphDef> Convert(const std::vector<std::vector<tensorflow::Tensor>>& inputs = {});
 
-  StatusOr<GraphDef> Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
+  Status Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
 
   void Summary(uint line_length = 160, bool detailed = true, std::ostream& ostream = std::cout);
 
@@ -115,6 +115,9 @@ class TrtGraphConverter {
 
   // The frozen GraphDef to convert.
   GraphDef frozen_graph_def_;
+
+  // The resulting segmented GraphDef from calling Convert.
+  GraphDef segmented_graph_def_;
 
   // Names of input tensors for the graph.
   const std::vector<std::string> input_names_;
