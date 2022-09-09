@@ -81,13 +81,6 @@ struct TrtConversionParams {
   // otherwise native TF is used. We recommend to set this value false and build
   // the engine in advance, to avoid runtime overhead.
   bool allow_build_at_runtime = true;
-
-  // Record the TRT engine as an attribute of the TRTEngineOp. This is only
-  // valid when max_cached_engines == 1. Note: the frozen graph together with
-  // the serialized engines have to be below 2GiB (protobuf size limit). If
-  // convert_to_static_engine = false, then the converted graph_def only
-  // contains placeholder TRTEngineOp nodes.
-  bool convert_to_static_engine = true;
 };
 
 class TrtGraphConverter {
@@ -100,7 +93,7 @@ class TrtGraphConverter {
 
   StatusOr<GraphDef> Convert(const std::vector<std::vector<tensorflow::Tensor>>& inputs = {});
 
-  Status Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
+  StatusOr<GraphDef> Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs);
 
   void Summary(uint line_length = 160, bool detailed = true, std::ostream& ostream = std::cout);
 

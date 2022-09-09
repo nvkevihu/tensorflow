@@ -241,13 +241,113 @@ Status RunSession(Session* session, const std::vector<std::string>& input_names,
   return Status::OK();
 }
 
-// TODO
-Status IsFrozenGraph(const GraphDef& graph) {
+// Returns the resource manager associated with the node.
+Status GetResourceManager(const NodeDef& node, Session* session,
+                          ResourceMgr** rm) {
+  const DeviceMgr* device_mgr;
+  TF_RETURN_IF_ERROR(session->LocalDeviceManager(&device_mgr));
+  Device* device;
+  string device_name = node.device().empty()
+                           ? "/job:localhost/replica:0/task:0/device:GPU:0"
+                           : node.device();
+  TF_RETURN_IF_ERROR(device_mgr->LookupDevice(device_name, &device));
+  *rm = device->resource_manager();
   return Status::OK();
 }
 
-// TODO
-Status CheckConversionParams(const TrtConversionParams& conversion_params) {
+// Looks up the cache resurce associated with the TRT node.
+Status GetEngineCacheResource(const NodeDef& node, Session* session,
+                              TRTEngineCacheResource** resource) {
+  ResourceMgr* rm;
+  TF_RETURN_IF_ERROR(GetResourceManager(node, session, &rm));
+
+  absl::string_view resource_name = node.name();
+  size_t last_slash = resource_name.find_last_of('/');
+  if (last_slash != absl::string_view::npos) {
+    resource_name.remove_prefix(last_slash + 1);
+  }
+  const std::string container(kTfTrtContainerName);
+  *resource = nullptr;
+  TF_RETURN_IF_ERROR(
+      rm->Lookup(container, std::string(resource_name), resource));
+  if (resource == nullptr || (*resource)->cache_.size() == 0) {
+    return errors::Internal("Engine cache not found for", resource_name);
+  }
+  return Status::OK();
+}
+
+// Looks up the engine from the engine cache, and serializes the engine.
+Status ReadSerializedEngine(
+    const NodeDef& node, Session* session,
+    TrtUniquePtrType<nvinfer1::IHostMemory>* engine_data) {
+  TRTEngineCacheResource* resource;
+  TF_RETURN_IF_ERROR(GetEngineCacheResource(node, session, &resource));
+  core::ScopedUnref unref_cache_res(resource);
+  if (resource->cache_.size() > 1) {
+    return errors::Internal(
+        "Multiple engines found, but we can only serialize one");
+  }
+  const std::unique_ptr<EngineContext>& engine =
+      resource->cache_.begin()->second;
+  if (!engine) {
+    return errors::Internal("Engine not found for", node.name());
+  }
+
+  if (engine->GetCudaEngine()) {
+    // Serialize the engine.
+    engine_data->reset(engine->GetCudaEngine()->serialize());
+  } else {
+    LOG(WARNING) << "Engine cache contains nullptr";
+  }
+
+  return Status::OK();
+}
+
+// Saves the TRT engines as attributes of the TRTEngineOp nodes.
+Status ConvertToStaticEngine(const GraphDef graph_def,
+                             GraphDef* static_graph_def, Session* session) {
+  static_graph_def->CopyFrom(graph_def);
+  VLOG(1) << "Saving TRT engines as static engine";
+  std::string op{"TRTEngineOp"};
+  for (auto& node : *(static_graph_def->mutable_node())) {
+    if (!op.compare(node.op())) {
+      VLOG(2) << "Saving TRT engine for " << node.name()
+              << ", device: " << node.device();
+      TrtUniquePtrType<nvinfer1::IHostMemory> engine_data;
+      TF_RETURN_IF_ERROR(ReadSerializedEngine(node, session, &engine_data));
+      auto* attr = node.mutable_attr();
+      AttrValue static_engine;
+      static_engine.set_b(true);
+      AttrValue engine_string;
+      if (engine_data) {
+        engine_string.set_s(engine_data->data(), engine_data->size());
+      }
+      (*attr)["static_engine"] = static_engine;
+      (*attr)["serialized_segment"] = engine_string;
+    }
+  }
+  return Status::OK();
+}
+
+Status IsFrozenGraph(const GraphDef& graph) {
+  // Sanity checks the graph; returns false if variable nodes are found.
+  std::set<std::string> variable_ops = {
+      "VariableV2", "VarHandleOp", "ReadVariableOp",
+      "ResourceGather", "ResourceGatherNd"};
+  for (const auto& node : graph.node()) {
+    if (variable_ops.find(node.op()) != variable_ops.end()) {
+      return errors::InvalidArgument("Input graph is not frozen");
+    }
+  }
+  return Status::OK();
+}
+
+Status ValidateConversionParams(const TrtConversionParams& p) {
+  if (p.precision_mode == TrtPrecisionMode::INT8 && p.use_calibration) {
+    return errors::InvalidArgument(
+        "Calibration not yet implemented through the C++ interface. Please use "
+        "our Python API for calibration.");
+  }
   return Status::OK();
 }
 
@@ -277,7 +377,7 @@ TrtGraphConverter::TrtGraphConverter(
 
 Status TrtGraphConverter::Validate() {
   TF_RETURN_IF_ERROR(IsFrozenGraph(frozen_graph_def_));
-  TF_RETURN_IF_ERROR(CheckConversionParams(conversion_params_));
+  TF_RETURN_IF_ERROR(ValidateConversionParams(conversion_params_));
   return Status::OK();
 }
 
@@ -298,7 +398,7 @@ StatusOr<GraphDef> TrtGraphConverter::Convert(const std::vector<std::vector<tens
   return segmented_graph_def_;
 }
 
-Status TrtGraphConverter::Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs) {
+StatusOr<GraphDef> TrtGraphConverter::Build(const std::vector<std::vector<tensorflow::Tensor>>& inputs) {
   // The TRTOptimization pass has inserted placeholder TRTEngineOps. Here we
   // trigger conversion by inferring the graph.
   std::unique_ptr<tensorflow::Session> session(
@@ -326,9 +426,13 @@ Status TrtGraphConverter::Build(const std::vector<std::vector<tensorflow::Tensor
   }
   TF_RETURN_IF_ERROR(
       RunSession(session.get(), input_names_, output_names_, *inputs.begin(), prefix));
+
   // TODO: Calibration
 
-  return Status::OK();
+  GraphDef output;
+  TF_RETURN_IF_ERROR(
+      ConvertToStaticEngine(segmented_graph_def_, &output, session.get()));
+  return output;
 }
 
 // TODO
