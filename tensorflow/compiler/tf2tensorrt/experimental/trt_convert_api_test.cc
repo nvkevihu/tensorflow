@@ -17,12 +17,17 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2tensorrt/experimental/trt_convert_api.h"
 
+#include "tensorflow/cc/ops/resource_variable_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/core/framework/function_testlib.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/status_matchers.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/public/session.h"
+
+using ::testing::HasSubstr;
+using ::tensorflow::testing::StatusIs;
 
 namespace tensorflow {
 namespace tensorrt {
@@ -30,6 +35,9 @@ namespace tensorrt {
 struct TestParam {
   TrtConversionParams conv_params;
   std::vector<std::vector<int64>> input_shapes;
+  bool use_variable = false;
+  errors::Code expected_code = errors::OK;
+  string expected_msg_substr = "";
 };
 
 class TrtGraphConverterTest
@@ -46,17 +54,32 @@ class TrtGraphConverterTest
     graph_ = GetGraphDef(shape);
     auto status_or_converter = TrtGraphConverter::Create(
         graph_, {"input"}, {"output"}, param_.conv_params);
-    TF_ASSERT_OK(status_or_converter.status());
-    converter_ = std::move(status_or_converter.ValueOrDie());
+    EXPECT_THAT(status_or_converter.status(),
+        StatusIs(param_.expected_code, HasSubstr(param_.expected_msg_substr)));
+    if (param_.expected_code == errors::OK) {
+      converter_ = std::move(status_or_converter.ValueOrDie());
+    }
   }
 
   // Returns the following graph: output = input * [42, 137] + input
   GraphDef GetGraphDef(PartialTensorShape input_shape) {
     Scope root = Scope::NewRootScope();
-    Output c = ops::Const(root.WithOpName("my_const"), {{42.0f, 137.0f}});
+    Output c;
+    c = ops::Const(root.WithOpName("my_const"), {{42.0f, 137.0f}});
+    Output v;
+    if (param_.use_variable) {
+      Output v_handle = ops::VarHandleOp(root.WithOpName("my_var"),
+                                         DataType::DT_FLOAT, {1, 2});
+      v = ops::ReadVariableOp(root.WithOpName("my_var/Read/ReadVariableOp"),
+                              v_handle, DataType::DT_FLOAT);
+      auto v_init =
+          ops::AssignVariableOp(root.WithOpName("my_var/init"), v_handle, c);
+    } else {
+      v = c;
+    }
     const auto attrs = ops::Placeholder::Shape(input_shape);
     auto x = ops::Placeholder(root.WithOpName("input"), DT_FLOAT, attrs);
-    auto y = ops::Mul(root.WithOpName("my_mul"), x, c);
+    auto y = ops::Mul(root.WithOpName("my_mul"), x, v);
     auto z = ops::Add(root.WithOpName("my_add"), x, y);
     auto q = ops::Identity(root.WithOpName("output"), z);
 
@@ -130,7 +153,7 @@ class TrtGraphConverterTest
 INSTANTIATE_TEST_CASE_P(
     TrtGraphConverterTestInstantiation, TrtGraphConverterTest,
     ::testing::Values(
-        // Dynamic shape mode test with conver_to_static_engine=true.
+        // Dynamic shape mode test.
         TestParam{
             TrtConversionParams{
                 1 << 20,  // max workspace size
@@ -140,10 +163,10 @@ INSTANTIATE_TEST_CASE_P(
                 false,  // use_calibration
                 true,   // use_dynamic_shape
                 ProfileStrategy::kOptimal,
-                true,  // allow_build_at_runtime
+                true,   // allow_build_at_runtime
             },
             {{1, 2}, {4, 2}}},
-        // Implicit batch mode test with conver_to_static_engine=true.
+        // Implicit batch mode test.
         TestParam{
             TrtConversionParams{
                 1 << 20,  // max workspace size
@@ -153,27 +176,10 @@ INSTANTIATE_TEST_CASE_P(
                 false,  // use_calibration
                 false,  // use_dynamic_shape
                 ProfileStrategy::kRange,
-                true,  // allow_build_at_runtime
+                true,   // allow_build_at_runtime
             },
             {{1, 2}}},
-        // Dynamic shape mode test convert_to_static_engine=false: we cannot
-        // save the engines, therefore we do not generate profiles. A single
-        // engine will be built during runtime, with profile that matches
-        // the first shape ({1,2}). The second shape will run as native
-        // segment.
-        TestParam{
-            TrtConversionParams{
-                1 << 20,  // max workspace size
-                TrtPrecisionMode::FP32,
-                3,      // minimum_segment_size
-                1,      // max_cached_engines
-                false,  // use_calibration
-                true,   // use_dynamic_shape
-                ProfileStrategy::kOptimal,
-                true,  // allow_build_at_runtime
-            },
-            {{1, 2}, {4, 2}}},
-        // Implicit batch mode test with convert_to_static_engine=false.
+        // Implicit batch mode test.
         // We will have two engines in the cache to handle the two shapes.
         TestParam{
             TrtConversionParams{
@@ -184,11 +190,46 @@ INSTANTIATE_TEST_CASE_P(
                 false,  // use_calibration
                 false,  // use_dynamic_shape
                 ProfileStrategy::kRange,
-                true,  // allow_build_at_runtime
+                true,   // allow_build_at_runtime
             },
-            {{1, 2}, {4, 2}}}));
+            {{1, 2}, {4, 2}}},
+        // Validation failure case for conversion params.
+        TestParam{
+            TrtConversionParams{
+                1 << 20,  // max workspace size
+                TrtPrecisionMode::INT8,
+                3,      // minimum_segment_size
+                1,      // max_cached_engines
+                true,   // use_calibration
+                false,  // use_dynamic_shape
+                ProfileStrategy::kOptimal,
+                true,   // allow_build_at_runtime
+            },
+            {{1, 2}, {4, 2}},
+            false,  // use_variable
+            errors::Code::INVALID_ARGUMENT,
+            "Calibration not yet implemented through the C++ interface"},
+        // Validation failure case for non-frozen graph.
+        TestParam{
+            TrtConversionParams{
+                1 << 20,  // max workspace size
+                TrtPrecisionMode::INT8,
+                3,      // minimum_segment_size
+                1,      // max_cached_engines
+                true,   // use_calibration
+                false,  // use_dynamic_shape
+                ProfileStrategy::kOptimal,
+                true,   // allow_build_at_runtime
+            },
+            {{1, 2}, {4, 2}},
+            true,  // use_variable
+            errors::Code::INVALID_ARGUMENT,
+            "Input graph is not frozen"}));
 
 TEST_P(TrtGraphConverterTest, Basic) {
+  if (param_.expected_code != errors::OK) {
+    return;
+  }
   TF_EXPECT_OK(converter_->Convert().status());
   StatusOr<GraphDef> result = converter_->Build(input_tensors_);
   TF_ASSERT_OK(result.status());

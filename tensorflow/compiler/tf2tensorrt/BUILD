@@ -184,6 +184,7 @@ tf_cuda_cc_test(
         "//tensorflow/core/kernels:ops_testutil",
         "//tensorflow/core/kernels:partitioned_function_ops",
         "//tensorflow/core/kernels:resource_variable_ops",
+        "//tensorflow/core/platform:status_matchers",
     ],
 )
 
